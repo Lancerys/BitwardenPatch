@@ -246,6 +246,17 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@v4
 
+      - name: Download browser source
+        uses: actions/download-artifact@v4
+        with:
+          name: browser-source-${{ env.LATEST_BROWSER_TAG }}.zip
+
+      - name: Unzip browser source artifact
+        run: |
+          set -euo pipefail
+          unzip browser-source.zip
+          rm -f browser-source.zip
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -258,17 +269,6 @@ jobs:
           set -euo pipefail
           node --version
           npm --version
-
-      - name: Download browser source
-        uses: actions/download-artifact@v4
-        with:
-          name: browser-source-${{ env.LATEST_BROWSER_TAG }}.zip
-
-      - name: Unzip browser source artifact
-        run: |
-          set -euo pipefail
-          unzip browser-source.zip
-          rm -f browser-source.zip
 
       - name: NPM setup
         working-directory: browser-source
