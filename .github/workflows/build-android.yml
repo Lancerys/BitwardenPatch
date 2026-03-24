@@ -1,169 +1,232 @@
 name: Build Android
 
 on:
-    workflow_call:
-        inputs: {}
-    workflow_dispatch:
-        inputs: {}
-    push:
-        branches: [master, main]
-        paths-ignore:
-          - ".github/workflows/build-browser.yml"
-    schedule:
-        # On every Sunday 12:00
-        - cron: "0 12 * * 0"
+  workflow_call:
+    secrets:
+      SIGN_KEYSTORE_BASE64:
+        required: true
+      GOOGLE_SERVICES_JSON:
+        required: true
+      KEYSTORE_PASSWORD:
+        required: true
+      KEY_PASSWORD:
+        required: true
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+    paths-ignore:
+      - ".github/workflows/build-browser.yml"
+  schedule:
+    # Every Sunday 12:00 UTC
+    - cron: "0 12 * * 0"
 
 permissions:
-    contents: write
+  contents: write
+
+concurrency:
+  group: build-android-${{ github.ref }}
+  cancel-in-progress: true
 
 defaults:
-    run:
-        shell: bash
+  run:
+    shell: bash
 
 jobs:
-    setup:
-        name: Setup
-        runs-on: ubuntu-22.04
-        outputs:
-            latest_android_tag: ${{ steps.gen_vars.outputs.latest_android_tag }}
-        steps:
-            - name: Check out repo
-              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+  setup:
+    name: Setup
+    runs-on: ubuntu-22.04
+    outputs:
+      latest_android_tag: ${{ steps.gen_vars.outputs.latest_android_tag }}
 
-            - name: Clone real repo
-              run: |
-                  git clone https://github.com/bitwarden/android.git
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-            - name: Get Latest Andorid Tag
-              id: gen_vars
-              working-directory: android
-              run: |
-                  # Find all tags and sort by time
-                  git fetch --tags
-                  tags=$(git tag --sort=-creatordate)
-                  # Find "android" tag
-                  latest_android_tag=""
-                  for tag in $tags; do
-                      if [[ $tag == *"bwpm"* ]]; then
-                          latest_android_tag=$tag
-                          break
-                      fi
-                  done
+      - name: Clone upstream Android repo
+        run: |
+          git clone --depth 1 https://github.com/bitwarden/android.git
 
-                  echo "latest_android_tag=$latest_android_tag" >> $GITHUB_OUTPUT
-                  echo "latest_android_tag=$latest_android_tag"
+      - name: Get latest Android tag
+        id: gen_vars
+        working-directory: android
+        run: |
+          set -euo pipefail
 
-    build-source:
-        name: Build andorid
-        runs-on: ubuntu-22.04
-        needs:
-            - setup
+          git fetch --tags --force
+
+          latest_android_tag="$(git tag --sort=-creatordate | grep 'bwpm' | head -n 1 || true)"
+
+          if [[ -z "${latest_android_tag}" ]]; then
+            echo "Failed to find latest Android tag matching 'bwpm'."
+            exit 1
+          fi
+
+          echo "latest_android_tag=${latest_android_tag}" >> "$GITHUB_OUTPUT"
+          echo "Resolved latest_android_tag=${latest_android_tag}"
+
+  build-source:
+    name: Build Android
+    runs-on: ubuntu-22.04
+    needs:
+      - setup
+
+    env:
+      LATEST_ANDROID_TAG: ${{ needs.setup.outputs.latest_android_tag }}
+      JAVA_VERSION: "21"
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate required secrets
+        run: |
+          set -euo pipefail
+
+          test -n "${{ secrets.SIGN_KEYSTORE_BASE64 }}" || { echo "SIGN_KEYSTORE_BASE64 is empty"; exit 1; }
+          test -n "${{ secrets.GOOGLE_SERVICES_JSON }}" || { echo "GOOGLE_SERVICES_JSON is empty"; exit 1; }
+          test -n "${{ secrets.KEYSTORE_PASSWORD }}" || { echo "KEYSTORE_PASSWORD is empty"; exit 1; }
+          test -n "${{ secrets.KEY_PASSWORD }}" || { echo "KEY_PASSWORD is empty"; exit 1; }
+
+      - name: Clone upstream Android repo
+        run: |
+          git clone https://github.com/bitwarden/android.git
+
+      - name: Checkout target tag
+        working-directory: android
+        run: |
+          set -euo pipefail
+
+          git fetch --tags --force
+          echo "Checking out ${LATEST_ANDROID_TAG}"
+          git checkout "${LATEST_ANDROID_TAG}"
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@4d9f0ba0025fe599b4ebab900eb7f3a1d93ef4c2 # v5.0.0
+
+      - name: Configure JDK
+        uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Configure Ruby
+        uses: ruby/setup-ruby@44511735964dcb71245e7e55f72539531f7bc0eb # v1.257.0
+        with:
+          ruby-version: "3.4.2"
+          bundler-cache: false
+
+      - name: Cache Gradle files
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-v3-${{ env.JAVA_VERSION }}-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties', 'android/**/libs.versions.toml', 'android/**/Gemfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-v3-${{ env.JAVA_VERSION }}-
+            ${{ runner.os }}-gradle-v3-
+
+      - name: Cache build output
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            ${{ github.workspace }}/build-cache
+          key: ${{ runner.os }}-build-cache-${{ github.ref_name }}-${{ env.LATEST_ANDROID_TAG }}
+          restore-keys: |
+            ${{ runner.os }}-build-cache-${{ github.ref_name }}-
+            ${{ runner.os }}-build-cache-
+
+      - name: Install Bundler and dependencies
+        working-directory: android
+        run: |
+          set -euo pipefail
+
+          gem install bundler:2.2.27
+          bundle config set path vendor/bundle
+          bundle install --jobs 4 --retry 3
+
+      - name: Set version from tag
+        working-directory: android
+        run: |
+          set -euo pipefail
+
+          TAG_NAME="${LATEST_ANDROID_TAG}"
+
+          VERSION_NAME="${TAG_NAME#v}"
+          VERSION_NAME="${VERSION_NAME%-bwpm}"
+
+          VERSION_CODE=$((11000 + GITHUB_RUN_NUMBER))
+
+          echo "Setting Version: ${VERSION_NAME} (${VERSION_CODE})"
+
+          bundle exec fastlane setBuildVersionInfo \
+            versionCode:"${VERSION_CODE}" \
+            versionName:"${VERSION_NAME}"
+
+      - name: Apply internal patch
+        working-directory: android
+        run: |
+          set -euo pipefail
+
+          test -f ../patches/android/hasPremium.patch || { echo "Patch file not found"; exit 1; }
+
+          cp ../patches/android/hasPremium.patch ./hasPremium.patch
+          git apply --check hasPremium.patch
+          git apply -v hasPremium.patch
+
+      - name: Prepare signing and Firebase files
+        working-directory: android
+        run: |
+          set -euo pipefail
+
+          mkdir -p ./keystores
+          mkdir -p ./app/src/standardRelease
+
+          printf '%s' '${{ secrets.SIGN_KEYSTORE_BASE64 }}' | base64 -d > ./keystores/leamocc.jks
+          printf '%s' '${{ secrets.GOOGLE_SERVICES_JSON }}' | base64 -d > ./app/src/standardRelease/google-services.json
+
+          test -s ./keystores/leamocc.jks || { echo "Decoded keystore is empty"; exit 1; }
+          test -s ./app/src/standardRelease/google-services.json || { echo "Decoded google-services.json is empty"; exit 1; }
+
+      - name: Generate release Play Store APK
+        working-directory: android
         env:
-            _LATEST_ANDROID_TAG: ${{ needs.setup.outputs.latest_android_tag }}
-            JAVA_VERSION: 21
-        steps:
-            - name: Check out repo
-              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
 
-            - name: Clone real repo
-              run: |
-                  git clone https://github.com/bitwarden/android.git
-            
-            - name: Setup repo
-              working-directory: android
-              run: |
-                  git fetch --tags
-                  echo "Checking out ${{ env._LATEST_ANDROID_TAG }}"
-                  git checkout ${{ env._LATEST_ANDROID_TAG }}
-            
-            - name: Validate Gradle wrapper
-              uses: gradle/actions/wrapper-validation@4d9f0ba0025fe599b4ebab900eb7f3a1d93ef4c2 # v5.0.0
+          bundle exec fastlane assemblePlayStoreReleaseApk \
+            storeFile:leamocc.jks \
+            storePassword:"${KEYSTORE_PASSWORD}" \
+            keyAlias:key0 \
+            keyPassword:"${KEY_PASSWORD}"
 
-            - name: Cache Gradle files
-              uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-              with:
-                path: |
-                  ~/.gradle/caches
-                  ~/.gradle/wrapper
-                key: ${{ runner.os }}-gradle-v2-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml') }}
-                restore-keys: |
-                  ${{ runner.os }}-gradle-v2-
+      - name: Verify APK output
+        working-directory: android
+        run: |
+          set -euo pipefail
 
-            - name: Cache build output
-              uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-              with:
-                path: |
-                  ${{ github.workspace }}/build-cache
-                key: ${{ runner.os }}-build-cache-${{ github.sha }}
-                restore-keys: |
-                  ${{ runner.os }}-build-
+          shopt -s nullglob
+          files=(app/build/outputs/apk/standard/release/*.apk)
 
-            - name: Configure JDK
-              uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
-              with:
-                distribution: "temurin"
-                java-version: ${{ env.JAVA_VERSION }}
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "No APK found in app/build/outputs/apk/standard/release/"
+            exit 1
+          fi
 
-            - name: Configure Ruby
-              uses: ruby/setup-ruby@44511735964dcb71245e7e55f72539531f7bc0eb # v1.257.0
-              with:
-                bundler-cache: true
-                ruby-version: '3.4.2'
+          printf 'Generated APK(s):\n'
+          printf '%s\n' "${files[@]}"
 
-            - name: Install Fastlane
-              working-directory: android
-              run: |
-                gem install bundler:2.2.27
-                bundle config path vendor/bundle
-                bundle install --jobs 4 --retry 3
-
-            - name: Set Version From Tag
-              working-directory: android
-              run: |
-                TAG_NAME="${{ env._LATEST_ANDROID_TAG }}"
-                
-                VERSION_NAME="${TAG_NAME#v}"
-                VERSION_NAME="${VERSION_NAME%-bwpm}"
-                
-                VERSION_CODE=$((11000 + GITHUB_RUN_NUMBER))
-                
-                echo "Setting Version: $VERSION_NAME ($VERSION_CODE)"
-                
-                bundle exec fastlane setBuildVersionInfo \
-                  versionCode:$VERSION_CODE \
-                  versionName:$VERSION_NAME
-
-            - name: Apply internal patch
-              working-directory: android
-              run: |
-                  cp ../patches/android/hasPremium.patch .
-                  git apply hasPremium.patch -v
-
-            - name: Generate release Play Store APK
-              working-directory: android
-              env:
-                KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-                KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-                GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              run: |
-                echo ${{ secrets.SIGN_KEYSTORE_BASE64 }} | base64 -d > ./keystores/leamocc.jks
-                mkdir ./app/src/standardRelease
-                echo ${{ secrets.GOOGLE_SERVICES_JSON }} | base64 -d > ./app/src/standardRelease/google-services.json
-                bundle exec fastlane assemblePlayStoreReleaseApk \
-                storeFile:leamocc.jks \
-                storePassword:"${{ env.KEYSTORE_PASSWORD }}" \
-                keyAlias:key0 \
-                keyPassword:"${{ env.KEY_PASSWORD }}"
-
-            - name: Create release
-              uses: ncipollo/release-action@2c591bcc8ecdcd2db72b97d6147f871fcd833ba5 # v1.14.0
-              continue-on-error: true
-              with:
-                  artifacts: "android/app/build/outputs/apk/standard/release/*.apk"
-                  tag: "${{ env._LATEST_ANDROID_TAG }}"
-                  name: "${{ env._LATEST_ANDROID_TAG }}"
-                  body: "${{ env._LATEST_ANDROID_TAG }} [Original Changelog](https://github.com/bitwarden/android/releases/tag/${{ env._LATEST_ANDROID_TAG }})"
-                  token: ${{ secrets.GITHUB_TOKEN }}
-                  draft: false
-                  allowUpdates: false
-                  makeLatest: true
+      - name: Create release
+        uses: ncipollo/release-action@2c591bcc8ecdcd2db72b97d6147f871fcd833ba5 # v1.14.0
+        with:
+          artifacts: "android/app/build/outputs/apk/standard/release/*.apk"
+          tag: ${{ env.LATEST_ANDROID_TAG }}
+          name: ${{ env.LATEST_ANDROID_TAG }}
+          body: ${{ env.LATEST_ANDROID_TAG }} [Original Changelog](https://github.com/bitwarden/android/releases/tag/${{ env.LATEST_ANDROID_TAG }})
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: false
+          allowUpdates: false
+          makeLatest: true
