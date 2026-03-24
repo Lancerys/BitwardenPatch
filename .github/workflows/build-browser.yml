@@ -205,6 +205,12 @@ jobs:
 
           zip -r browser-source.zip browser-source
 
+      - name: Verify browser source artifact
+        working-directory: clients
+        run: |
+          set -euo pipefail
+          test -f browser-source.zip || { echo "browser-source.zip not found"; exit 1; }
+
       - name: Upload browser source
         uses: actions/upload-artifact@v4
         with:
@@ -256,6 +262,7 @@ jobs:
           set -euo pipefail
           unzip browser-source.zip
           rm -f browser-source.zip
+          test -d browser-source || { echo "browser-source directory not found after unzip"; exit 1; }
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -274,6 +281,7 @@ jobs:
         working-directory: browser-source
         run: |
           set -euo pipefail
+          test -f package-lock.json || { echo "package-lock.json not found"; exit 1; }
           npm ci
 
       - name: Check source file size
@@ -281,20 +289,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          declare -a FILES
+          FILES=()
           TARGET_DIR="./browser-source/apps/browser"
 
           while IFS= read -r RESULT; do
-            FILES+=("$RESULT")
-          done < <(find "$TARGET_DIR" -size +5M)
+            [[ -n "$RESULT" ]] && FILES+=("$RESULT")
+          done < <(find "$TARGET_DIR" -type f -size +5M)
 
-          if [[ ${#FILES[@]} -ne 0 ]]; then
+          if (( ${#FILES[@]} > 0 )); then
             echo "File(s) exceed size limit: 5MB"
             for FILE in "${FILES[@]}"; do
               du --si "$FILE"
             done
             echo "ERROR Firefox rejects extension uploads that contain files larger than 5MB"
             # exit 1
+          else
+            echo "No files exceed 5MB"
           fi
 
       - name: Build extension
