@@ -1,4 +1,3 @@
-````md
 # BitwardenPatch
 
 ## 解锁 Bitwarden 官方客户端 TOTP 功能
