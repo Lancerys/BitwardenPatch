@@ -1,27 +1,37 @@
 diff --git a/app/src/main/kotlin/com/x8bit/bitwarden/data/auth/repository/util/GetTokenResponseExtensions.kt b/app/src/main/kotlin/com/x8bit/bitwarden/data/auth/repository/util/GetTokenResponseExtensions.kt
-index 90b1ce120..d44642099 100644
 --- a/app/src/main/kotlin/com/x8bit/bitwarden/data/auth/repository/util/GetTokenResponseExtensions.kt
 +++ b/app/src/main/kotlin/com/x8bit/bitwarden/data/auth/repository/util/GetTokenResponseExtensions.kt
-@@ -31,7 +31,7 @@ fun GetTokenResponseJson.Success.toUserState(
+@@ -32,7 +32,7 @@ fun GetTokenResponseJson.Success.toUserState(
              stamp = null,
              organizationId = null,
              avatarColorHex = null,
--            hasPremium = jwtTokenData.hasPremium,
-+            hasPremium = true,
-             forcePasswordResetReason = this.toForcePasswordResetReason(),
-             kdfType = this.kdfType,
-             kdfIterations = this.kdfIterations,
+-            hasPremiumPersonally = jwtTokenData.hasPremium,
++            hasPremiumPersonally = true,
+             hasPremiumFromOrganization = null,
+             forcePasswordResetReason = this.toForcePasswordResetReason(
+                 passwordPassesPolicy = passwordPassesPolicy,
 diff --git a/app/src/main/kotlin/com/x8bit/bitwarden/data/auth/repository/util/UserStateJsonExtensions.kt b/app/src/main/kotlin/com/x8bit/bitwarden/data/auth/repository/util/UserStateJsonExtensions.kt
-index f036bcc0a..85000fe17 100644
 --- a/app/src/main/kotlin/com/x8bit/bitwarden/data/auth/repository/util/UserStateJsonExtensions.kt
 +++ b/app/src/main/kotlin/com/x8bit/bitwarden/data/auth/repository/util/UserStateJsonExtensions.kt
-@@ -166,7 +166,7 @@ fun UserStateJson.toUserState(
+@@ -68,7 +68,7 @@ fun UserStateJson.toUpdatedUserStateJson(
+         forcePasswordResetReason = forcePasswordResetReason,
+         avatarColorHex = syncProfile.avatarColor,
+         stamp = syncProfile.securityStamp,
+-        hasPremiumPersonally = syncProfile.isPremium,
++        hasPremiumPersonally = true,
+         hasPremiumFromOrganization = syncProfile.isPremiumFromOrganization,
+         isTwoFactorEnabled = syncProfile.isTwoFactorEnabled,
+         creationDate = syncProfile.creationDate,
+@@ -277,10 +277,9 @@ fun UserStateJson.toUserState(
+                     environment = accountJson
                          .settings
                          .environmentUrlData
                          .toEnvironmentUrlsOrDefault(),
--                    isPremium = profile.hasPremium == true,
+-                    isPremium = profile.hasPremiumPersonally == true ||
+-                        profile.hasPremiumFromOrganization == true,
+-                    isPremiumFromSelf = profile.hasPremiumPersonally == true,
 +                    isPremium = true,
++                    isPremiumFromSelf = true,
                      isLoggedIn = userAccountTokens
                          .find { it.userId == userId }
                          ?.isLoggedIn == true,
----
