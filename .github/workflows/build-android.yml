@@ -148,7 +148,12 @@ jobs:
           sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?}}"
           llvm_strip="${sdk_root}/ndk/${ndk_version}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
           if [[ ! -x "$llvm_strip" ]]; then
-            sdkmanager --install "ndk;${ndk_version}" --channel=0 < /dev/null
+            sdk_manager="${sdk_root}/cmdline-tools/latest/bin/sdkmanager"
+            if [[ ! -x "$sdk_manager" ]]; then
+              sdk_manager="$(find "${sdk_root}/cmdline-tools" -maxdepth 3 -type f -name sdkmanager | head -n 1)"
+            fi
+            test -x "$sdk_manager"
+            "$sdk_manager" --install "ndk;${ndk_version}" --channel=0 < /dev/null
           fi
           test -x "$llvm_strip"
           echo "Ready to strip native libraries with NDK ${ndk_version}."
