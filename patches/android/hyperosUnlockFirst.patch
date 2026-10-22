@@ -1,0 +1,366 @@
+diff --git a/app/src/main/kotlin/com/x8bit/bitwarden/data/credentials/manager/CredentialManagerPendingIntentManager.kt b/app/src/main/kotlin/com/x8bit/bitwarden/data/credentials/manager/CredentialManagerPendingIntentManager.kt
+--- a/app/src/main/kotlin/com/x8bit/bitwarden/data/credentials/manager/CredentialManagerPendingIntentManager.kt
++++ b/app/src/main/kotlin/com/x8bit/bitwarden/data/credentials/manager/CredentialManagerPendingIntentManager.kt
+@@ -21,7 +21,10 @@
+  *
+  * @see CredentialManagerPendingIntentManager.createFido2GetCredentialPendingIntent
+  */
+-const val EXTRA_KEY_CIPHER_ID: String = "cipher_id"
++const val EXTRA_KEY_CIPHER_ID: String = "cipher_id"
++
++/** Sentinel for a generic HyperOS unlock-first entry, never a real vault cipher ID. */
++const val HYPEROS_UNLOCK_FIRST_SENTINEL_CIPHER_ID: String = "hyperos-unlock-first-entry"
+ 
+ /**
+  * Key for the user verification performed during vault unlock while
+diff --git a/app/src/main/kotlin/com/x8bit/bitwarden/data/credentials/processor/CredentialProviderProcessorImpl.kt b/app/src/main/kotlin/com/x8bit/bitwarden/data/credentials/processor/CredentialProviderProcessorImpl.kt
+--- a/app/src/main/kotlin/com/x8bit/bitwarden/data/credentials/processor/CredentialProviderProcessorImpl.kt
++++ b/app/src/main/kotlin/com/x8bit/bitwarden/data/credentials/processor/CredentialProviderProcessorImpl.kt
+@@ -22,17 +22,21 @@
+ import androidx.credentials.provider.BeginCreatePasswordCredentialRequest
+ import androidx.credentials.provider.BeginCreatePublicKeyCredentialRequest
+ import androidx.credentials.provider.BeginGetCredentialRequest
+-import androidx.credentials.provider.BeginGetCredentialResponse
++import androidx.credentials.provider.BeginGetCredentialResponse
++import androidx.credentials.provider.BeginGetPublicKeyCredentialOption
+ import androidx.credentials.provider.BiometricPromptData
+ import androidx.credentials.provider.CreateEntry
+-import androidx.credentials.provider.ProviderClearCredentialStateRequest
++import androidx.credentials.provider.ProviderClearCredentialStateRequest
++import androidx.credentials.provider.PublicKeyCredentialEntry
+ import com.bitwarden.core.data.manager.dispatcher.DispatcherManager
+-import com.bitwarden.core.util.isBuildVersionAtLeast
++import com.bitwarden.core.util.isBuildVersionAtLeast
++import com.bitwarden.core.util.isHyperOS
+ import com.bitwarden.ui.platform.resource.BitwardenString
+ import com.x8bit.bitwarden.data.auth.repository.AuthRepository
+ import com.x8bit.bitwarden.data.auth.repository.model.UserState
+ import com.x8bit.bitwarden.data.credentials.manager.BitwardenCredentialManager
+-import com.x8bit.bitwarden.data.credentials.manager.CredentialManagerPendingIntentManager
++import com.x8bit.bitwarden.data.credentials.manager.CredentialManagerPendingIntentManager
++import com.x8bit.bitwarden.data.credentials.manager.HYPEROS_UNLOCK_FIRST_SENTINEL_CIPHER_ID
+ import com.x8bit.bitwarden.data.credentials.model.GetCredentialsRequest
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.launch
+@@ -101,7 +105,35 @@
+             return
+         }
+ 
+-        // Return an unlock action if the current account is locked.
++        // HyperOS may close selectors that contain only AuthenticationAction entries.
++        // Present a clearly labeled, NON-autoselectable entry that launches Bitwarden's
++        // existing vault-unlock and FIDO2 assertion flow. No credential metadata is cached.
++        if (!userState.activeAccount.isVaultUnlocked && isHyperOS()) {
++            val unlockEntries = request.beginGetCredentialOptions
++                .filterIsInstance<BeginGetPublicKeyCredentialOption>()
++                .map { option ->
++                    PublicKeyCredentialEntry.Builder(
++                        context = context,
++                        username = context.getString(BitwardenString.unlock),
++                        pendingIntent = pendingIntentManager.createFido2GetCredentialPendingIntent(
++                            userId = userState.activeUserId,
++                            credentialId = HYPEROS_UNLOCK_FIRST_SENTINEL_CIPHER_ID,
++                            cipherId = HYPEROS_UNLOCK_FIRST_SENTINEL_CIPHER_ID,
++                            isUserVerified = false,
++                        ),
++                        beginGetPublicKeyCredentialOption = option,
++                    )
++                        .setAutoSelectAllowed(false)
++                        .build()
++                }
++            if (unlockEntries.isNotEmpty()) {
++                Timber.d("HyperOS generic unlock-first entry provided.")
++                callback.onResult(BeginGetCredentialResponse(credentialEntries = unlockEntries))
++                return
++            }
++        }
++
++        // Return an unlock action if the current account is locked.
+         if (!userState.activeAccount.isVaultUnlocked) {
+             Timber.d("Vault is locked. Requesting unlock.")
+             val authenticationAction = AuthenticationAction(
+diff --git a/app/src/main/kotlin/com/x8bit/bitwarden/ui/vault/feature/itemlisting/VaultItemListingViewModel.kt b/app/src/main/kotlin/com/x8bit/bitwarden/ui/vault/feature/itemlisting/VaultItemListingViewModel.kt
+--- a/app/src/main/kotlin/com/x8bit/bitwarden/ui/vault/feature/itemlisting/VaultItemListingViewModel.kt
++++ b/app/src/main/kotlin/com/x8bit/bitwarden/ui/vault/feature/itemlisting/VaultItemListingViewModel.kt
+@@ -1,6 +1,7 @@
+ package com.x8bit.bitwarden.ui.vault.feature.itemlisting
+ 
+-import android.os.Parcelable
++import android.os.Parcelable
++import android.util.Base64
+ import androidx.annotation.DrawableRes
+ import androidx.credentials.CreatePasswordRequest
+ import androidx.credentials.CreatePublicKeyCredentialRequest
+@@ -47,7 +48,8 @@
+ import com.x8bit.bitwarden.data.autofill.model.AutofillSelectionData
+ import com.x8bit.bitwarden.data.autofill.util.isActiveWithFido2Credentials
+ import com.x8bit.bitwarden.data.billing.manager.PremiumStateManager
+-import com.x8bit.bitwarden.data.credentials.manager.BitwardenCredentialManager
++import com.x8bit.bitwarden.data.credentials.manager.BitwardenCredentialManager
++import com.x8bit.bitwarden.data.credentials.manager.HYPEROS_UNLOCK_FIRST_SENTINEL_CIPHER_ID
+ import com.x8bit.bitwarden.data.credentials.manager.OriginManager
+ import com.x8bit.bitwarden.data.credentials.model.CreateCredentialRequest
+ import com.x8bit.bitwarden.data.credentials.model.Fido2CredentialAssertionRequest
+@@ -123,7 +125,10 @@
+ import kotlinx.coroutines.flow.update
+ import kotlinx.coroutines.launch
+ import kotlinx.parcelize.Parcelize
+-import timber.log.Timber
++import timber.log.Timber
++import org.json.JSONObject
++import java.nio.ByteBuffer
++import java.util.UUID
+ import java.time.Clock
+ import javax.inject.Inject
+ import kotlin.time.Duration.Companion.milliseconds
+@@ -269,7 +274,8 @@
+                 VaultItemListingsAction.Internal.VaultDataReceive(
+                     it
+                         .filterForAutofillIfNecessary()
+-                        .filterForCredentialCreationIfNecessary()
++                        .filterForCredentialCreationIfNecessary()
++                        .filterForGenericPasskeyIfNecessary()
+                         .filterForTotpIfNecessary(),
+                 )
+             }
+@@ -958,11 +964,40 @@
+             return
+         }
+ 
+-        state.createCredentialRequest
+-            ?.let {
+-                handleItemClickForProviderCreateCredentialRequest(action, it)
+-                return
+-            }
++        state.createCredentialRequest
++            ?.let {
++                handleItemClickForProviderCreateCredentialRequest(action, it)
++                return
++            }
++
++        // The generic entry represents an unlock request, not a real credential.
++        // After unlocking, the user explicitly picks a genuine RP-matching vault item.
++        state.fido2CredentialAssertionRequest
++            ?.takeIf { it.cipherId == HYPEROS_UNLOCK_FIRST_SENTINEL_CIPHER_ID }
++            ?.let { request ->
++                val isMatchingItem = (state.viewState as? VaultItemListingState.ViewState.Content)
++                    ?.displayItemList
++                    ?.any { it.id == action.id } == true
++                if (!isMatchingItem) {
++                    sendCredentialItemNotFoundError()
++                    return
++                }
++                viewModelScope.launch {
++                    getCipherViewForCredentialOrNull(action.id)?.let { cipherView ->
++                        if (state.hasMasterPassword &&
++                            cipherView.reprompt == CipherRepromptType.PASSWORD
++                        ) {
++                            repromptMasterPasswordForUserVerification(action.id)
++                        } else {
++                            verifyUserAndAuthenticateCredential(
++                                request = request.providerRequest,
++                                selectedCipher = cipherView,
++                            )
++                        }
++                    }
++                }
++                return
++            }
+ 
+         val event = when (val itemType = action.type) {
+             is VaultItemListingState.DisplayItem.ItemType.Vault -> {
+@@ -1556,8 +1591,16 @@
+         }
+     }
+ 
+-    private fun handleBackClick() {
+-        sendEvent(
++    private fun handleBackClick() {
++        if (state.isGenericPasskeySelection) {
++            sendEvent(
++                VaultItemListingEvent.CompleteFido2Assertion(
++                    result = AssertFido2CredentialResult.Cancelled,
++                ),
++            )
++            return
++        }
++        sendEvent(
+             event = if (state.isTotp || state.isAutofill) {
+                 VaultItemListingEvent.ExitApp
+             } else {
+@@ -2235,14 +2278,26 @@
+ 
+         state.getCredentialsRequest
+             ?.let { handleProviderGetCredentialsRequest(it) }
+-            ?: state.fido2CredentialAssertionRequest
+-                ?.let { request ->
+-                    trySendAction(
+-                        VaultItemListingsAction.Internal.Fido2AssertionDataReceive(
+-                            data = request,
+-                        ),
+-                    )
+-                }
++            ?: state.fido2CredentialAssertionRequest
++                ?.let { request ->
++                    if (request.cipherId == HYPEROS_UNLOCK_FIRST_SENTINEL_CIPHER_ID) {
++                        if (vaultData.data.decryptCipherListResult.successes.isEmpty()) {
++                            showCredentialManagerErrorDialog(
++                                BitwardenString
++                                    .credential_operation_failed_because_the_selected_item_does_not_exist
++                                    .asText(),
++                            )
++                        } else {
++                            mutableStateFlow.update { it.copy(isRefreshing = false) }
++                        }
++                    } else {
++                        trySendAction(
++                            VaultItemListingsAction.Internal.Fido2AssertionDataReceive(
++                                data = request,
++                            ),
++                        )
++                    }
++                }
+             ?: state.providerGetPasswordCredentialRequest
+                 ?.let { request ->
+                     trySendAction(
+@@ -2906,9 +2961,71 @@
+         }
+     }
+ 
+-    /**
+-     * Takes the given vault data and filters it for totp data.
+-     */
++    /**
++     * A generic entry gives no site-specific information before the vault is unlocked.
++     * Once unlocked, use the real RP ID and allowCredentials list to display ONLY
++     * matching stored passkeys. Actual signing still uses Bitwarden's origin validation.
++     */
++    private fun DataState<VaultData>.filterForGenericPasskeyIfNecessary(): DataState<VaultData> {
++        val request = state.fido2CredentialAssertionRequest
++            ?.takeIf { it.cipherId == HYPEROS_UNLOCK_FIRST_SENTINEL_CIPHER_ID }
++            ?: return this
++        val option = request.option
++        val relyingPartyId = option?.let { relyingPartyParser.parse(it) }
++        val allowedIds = option?.requestJson
++            ?.let { runCatching { JSONObject(it) }.getOrNull() }
++            ?.optJSONArray("allowCredentials")
++            ?.let { array ->
++                buildSet {
++                    for (index in 0 until array.length()) {
++                        array.optJSONObject(index)
++                            ?.optString("id")
++                            ?.takeIf { it.isNotBlank() }
++                            ?.trimEnd('=')
++                            ?.let { add(it) }
++                    }
++                }
++            }
++            .orEmpty()
++        return this.map { vaultData ->
++            vaultData.copy(
++                decryptCipherListResult = vaultData.decryptCipherListResult.copy(
++                    successes = vaultData.decryptCipherListResult.successes.filter { cipher ->
++                        cipher.isActiveWithFido2Credentials &&
++                            (cipher.type as? CipherListViewType.Login)
++                                ?.v1
++                                ?.fido2Credentials
++                                .orEmpty()
++                                .any { credential ->
++                                    credential.rpId == relyingPartyId &&
++                                        (allowedIds.isEmpty() ||
++                                            credential.credentialId.toBase64UrlIdOrNull() in allowedIds)
++                                }
++                    },
++                    failures = emptyList(),
++                ),
++            )
++        }
++    }
++
++    private fun String.toBase64UrlIdOrNull(): String? =
++        if (startsWith("b64.")) {
++            removePrefix("b64.").trimEnd('=')
++        } else {
++            runCatching { UUID.fromString(this) }.getOrNull()?.let { uuid ->
++                Base64.encodeToString(
++                    ByteBuffer.allocate(16)
++                        .putLong(uuid.mostSignificantBits)
++                        .putLong(uuid.leastSignificantBits)
++                        .array(),
++                    Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
++                )
++            }
++        }
++
++    /**
++     * Takes the given vault data and filters it for totp data.
++     */
+     private fun DataState<VaultData>.filterForTotpIfNecessary(): DataState<VaultData> {
+         val totpData = state.totpData ?: return this
+         val query = totpData.issuer ?: totpData.accountName ?: return this
+@@ -3017,11 +3134,13 @@
+                 -> null
+         }
+ 
+-    /**
+-     * Whether the add FAB should be shown.
+-     */
+-    val hasAddItemFabButton: Boolean
+-        get() = if (restrictItemTypesPolicyOrgIds.isNotEmpty() &&
++    /**
++     * Whether the add FAB should be shown.
++     */
++    val hasAddItemFabButton: Boolean
++        get() = if (isGenericPasskeySelection) {
++            false
++        } else if (restrictItemTypesPolicyOrgIds.isNotEmpty() &&
+             itemListingType == ItemListingType.Vault.Card
+         ) {
+             false
+@@ -3036,9 +3155,16 @@
+     val isAutofill: Boolean
+         get() = autofillSelectionData != null
+ 
+-    /**
+-     * Whether this represents a listing screen for CredentialManager creation requests.
+-     */
++    /**
++     * True only when the HyperOS unlock-first entry was selected.
++     */
++    val isGenericPasskeySelection: Boolean
++        get() = fido2CredentialAssertionRequest?.cipherId ==
++            HYPEROS_UNLOCK_FIRST_SENTINEL_CIPHER_ID
++
++    /**
++     * Whether this represents a listing screen for CredentialManager creation requests.
++     */
+     val isCredentialManagerCreation: Boolean
+         get() = createCredentialRequest != null
+ 
+@@ -3102,17 +3228,19 @@
+     /**
+      * Whether the search icon should be shown.
+      */
+-    val shouldShowSearchIcon: Boolean
+-        get() = viewState is ViewState.Content ||
+-            isAutofill ||
+-            isTotp ||
+-            isCredentialManagerCreation
++    val shouldShowSearchIcon: Boolean
++        get() = !isGenericPasskeySelection &&
++            (viewState is ViewState.Content ||
++                isAutofill ||
++                isTotp ||
++                isCredentialManagerCreation)
+ 
+     /**
+      * Whether the overflow menu should be shown.
+      */
+-    val shouldShowOverflowMenu: Boolean
+-        get() = !isAutofill && !isCredentialManagerCreation && !isTotp
++    val shouldShowOverflowMenu: Boolean
++        get() = !isGenericPasskeySelection && !isAutofill &&
++            !isCredentialManagerCreation && !isTotp
+ 
+     /**
+      * Represents the current state of any dialogs on the screen.
