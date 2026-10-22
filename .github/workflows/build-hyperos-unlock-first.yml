@@ -1,0 +1,145 @@
+name: HyperOS Passkey Unlock-First A Experiment
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - experiment/hyperos-unlock-first
+    paths:
+      - .github/workflows/build-hyperos-unlock-first.yml
+      - patches/android/hyperosUnlockFirst.patch
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: hyperos-unlock-first-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      UPSTREAM_TAG: v2026.10.0-bwpm
+    steps:
+      - name: Check out patch repository
+        uses: actions/checkout@v4
+
+      - name: Clone pinned Bitwarden source
+        run: |
+          set -euo pipefail
+          git clone https://github.com/bitwarden/android.git
+          cd android
+          git fetch --tags --force
+          git checkout "${UPSTREAM_TAG}"
+          echo "Upstream revision: $(git rev-parse HEAD)"
+
+      - name: Validate and apply the A unlock-first patch
+        working-directory: android
+        run: |
+          set -euo pipefail
+          git apply --check ../patches/android/hasPremium.patch
+          git apply ../patches/android/hasPremium.patch
+          git apply --check ../patches/android/hyperosUnlockFirst.patch
+          git apply --verbose ../patches/android/hyperosUnlockFirst.patch
+          git diff --check
+          echo 'Both patches applied.'
+
+      - name: Configure JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Configure Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4.2'
+          bundler-cache: false
+
+      - name: Install Bundler dependencies
+        working-directory: android
+        run: |
+          set -euo pipefail
+          gem install bundler:2.2.27
+          bundle config set path vendor/bundle
+          bundle install --jobs 4 --retry 3
+
+      - name: Resolve versionCode using stable Android workflow
+        id: installed_compatible_code
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The experiment workflow starts its own run number from 1.
+          # Reusing that run number would make its APK older than the existing
+          # installed release (INSTALL_FAILED_VERSION_DOWNGRADE).
+          stable_run_number="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/build-android.yml/runs?branch=main&per_page=1" \
+            --jq '.workflow_runs[0].run_number')"
+          if [[ ! "$stable_run_number" =~ ^[0-9]+$ ]]; then
+            echo 'Unable to discover stable workflow run number; refusing to build an APK with an unknown versionCode.'
+            exit 1
+          fi
+          stable_code=$((11000 + stable_run_number))
+          version_code=$((stable_code + 2))
+          # The already-installed B experiment was confirmed as versionCode 11042.
+          if (( version_code <= 11042 )); then version_code=11043; fi
+          echo "version_code=${version_code}" >> "$GITHUB_OUTPUT"
+          echo "Experiment APK versionCode=${version_code}"
+
+      - name: Set experiment version
+        working-directory: android
+        env:
+          EXPERIMENT_VERSION_CODE: ${{ steps.installed_compatible_code.outputs.version_code }}
+        run: |
+          set -euo pipefail
+          bundle exec fastlane setBuildVersionInfo \
+            versionCode:"${EXPERIMENT_VERSION_CODE}" \
+            versionName:"2026.10.0-hyperos-a1"
+
+      - name: Validate signing and Firebase secrets
+        env:
+          SIGN_KEYSTORE_BASE64: ${{ secrets.SIGN_KEYSTORE_BASE64 }}
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$SIGN_KEYSTORE_BASE64"
+          test -n "$GOOGLE_SERVICES_JSON"
+          test -n "$KEYSTORE_PASSWORD"
+          test -n "$KEY_PASSWORD"
+          mkdir -p android/keystores android/app/src/standardRelease
+          printf '%s' "$SIGN_KEYSTORE_BASE64" | base64 -d > android/keystores/leamocc.jks
+          printf '%s' "$GOOGLE_SERVICES_JSON" | base64 -d > android/app/src/standardRelease/google-services.json
+          test -s android/keystores/leamocc.jks
+          test -s android/app/src/standardRelease/google-services.json
+
+      - name: Assemble signed experiment APK
+        working-directory: android
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          bundle exec fastlane assemblePlayStoreReleaseApk \
+            storeFile:leamocc.jks \
+            storePassword:"${KEYSTORE_PASSWORD}" \
+            keyAlias:key0 \
+            keyPassword:"${KEY_PASSWORD}"
+
+      - name: Verify build output
+        run: |
+          set -euo pipefail
+          ls -lh android/app/build/outputs/apk/standard/release/*.apk
+
+      - name: Upload experiment APK only (no Release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitwarden-hyperos-unlock-first-a
+          path: android/app/build/outputs/apk/standard/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
