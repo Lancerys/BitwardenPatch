@@ -73,7 +73,7 @@ jobs:
           Path("apk-size-audit.md").write_text(txt, encoding="utf-8")
           PY
       - name: Upload size-audit report
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: apk-size-audit-report
           path: apk-size-audit.md

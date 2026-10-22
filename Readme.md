@@ -169,3 +169,7 @@ patches/
 - A 实验分支保留，不再维护 B Warm-Cache 实验。
 - 新上游版本若不能干净应用补丁，Android CI 将直接失败而非悄悄删除修复。
 - `APK Size Regression Audit` 可以对比历史版本 APK 的 ZIP 内部条目，定位体积增长。
+
+### APK 体积与 NDK
+
+上游 Android Gradle Plugin 9.4 的默认 NDK 是 `28.2.13676358`。CI 构建前安装这一版 NDK，使 AGP 能从 Bitwarden 的 `libbitwarden_uniffi.so` 等原生库中剥离不必要的 `.symtab/.strtab`，并在产物发布前断言符号表已被剥离，防止原生库失去 Strip 处理而使通用 APK 增长约 50 MiB。构建机使用与官方一致的 Ubuntu 24.04。
