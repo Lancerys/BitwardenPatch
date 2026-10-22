@@ -135,7 +135,7 @@ jobs:
           ls -lh android/app/build/outputs/apk/standard/release/*.apk
 
       - name: Upload experiment APK only (no Release)
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: bitwarden-hyperos-unlock-first-a
           path: android/app/build/outputs/apk/standard/release/*.apk
