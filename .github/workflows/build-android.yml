@@ -1,4 +1,4 @@
-name: Build Android
+name: Build Android (Standard + HyperOS)
 
 on:
   workflow_call:
@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: Check out repo
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@v6
 
       - name: Clone upstream Android repo
         run: |
@@ -65,10 +65,14 @@ jobs:
           echo "Resolved latest_android_tag=${latest_android_tag}"
 
   build-source:
-    name: Build Android
+    name: Build Android (${{ matrix.variant }})
     runs-on: ubuntu-22.04
     needs:
       - setup
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [standard, hyperos]
 
     env:
       LATEST_ANDROID_TAG: ${{ needs.setup.outputs.latest_android_tag }}
@@ -76,7 +80,7 @@ jobs:
 
     steps:
       - name: Check out repo
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@v6
 
       - name: Validate required secrets
         run: |
@@ -116,7 +120,7 @@ jobs:
           bundler-cache: false
 
       - name: Cache Gradle files
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.gradle/caches
@@ -127,7 +131,7 @@ jobs:
             ${{ runner.os }}-gradle-v3-
 
       - name: Cache build output
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        uses: actions/cache@v5
         with:
           path: |
             ${{ github.workspace }}/build-cache
@@ -154,8 +158,11 @@ jobs:
 
           VERSION_NAME="${TAG_NAME#v}"
           VERSION_NAME="${VERSION_NAME%-bwpm}"
+          VERSION_NAME="${VERSION_NAME}-${{ matrix.variant }}"
 
-          VERSION_CODE=$((11000 + GITHUB_RUN_NUMBER))
+          # Reserve a higher versionCode range for safe in-place updates.
+          # Both APK variants use the SAME value for easy switching.
+          VERSION_CODE=$((12000 + GITHUB_RUN_NUMBER))
 
           echo "Setting Version: ${VERSION_NAME} (${VERSION_CODE})"
 
@@ -173,6 +180,13 @@ jobs:
           cp ../patches/android/hasPremium.patch ./hasPremium.patch
           git apply --check hasPremium.patch
           git apply -v hasPremium.patch
+
+          if [[ "${{ matrix.variant }}" == "hyperos" ]]; then
+            test -f ../patches/android/hyperosUnlockFirst.patch
+            git apply --check ../patches/android/hyperosUnlockFirst.patch
+            git apply --verbose ../patches/android/hyperosUnlockFirst.patch
+          fi
+          git diff --check
 
       - name: Prepare signing and Firebase files
         working-directory: android
@@ -219,14 +233,69 @@ jobs:
           printf 'Generated APK(s):\n'
           printf '%s\n' "${files[@]}"
 
-      - name: Create release
-        uses: ncipollo/release-action@2c591bcc8ecdcd2db72b97d6147f871fcd833ba5 # v1.14.0
+      - name: Stage named variant APK
+        working-directory: android
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(app/build/outputs/apk/standard/release/*.apk)
+          if (( ${#files[@]} != 1 )); then
+            echo "Expected exactly one Android APK, got ${#files[@]}."
+            exit 1
+          fi
+          mkdir -p ../dist
+          cp "${files[0]}" "../dist/Bitwarden-${LATEST_ANDROID_TAG}-${{ matrix.variant }}.apk"
+          ls -lh ../dist/*.apk
+          sha256sum ../dist/*.apk
+
+      - name: Upload variant APK artifact
+        uses: actions/upload-artifact@v5
         with:
-          artifacts: "android/app/build/outputs/apk/standard/release/*.apk"
-          tag: ${{ env.LATEST_ANDROID_TAG }}
-          name: ${{ env.LATEST_ANDROID_TAG }}
-          body: ${{ env.LATEST_ANDROID_TAG }} [Original Changelog](https://github.com/bitwarden/android/releases/tag/${{ env.LATEST_ANDROID_TAG }})
-          token: ${{ secrets.GITHUB_TOKEN }}
-          draft: false
-          allowUpdates: false
-          makeLatest: true
+          name: bitwarden-android-${{ matrix.variant }}
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish both Android variants
+    runs-on: ubuntu-22.04
+    needs: [setup, build-source]
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LATEST_ANDROID_TAG: ${{ needs.setup.outputs.latest_android_tag }}
+    steps:
+      - name: Download both APK artifacts
+        uses: actions/download-artifact@v5
+        with:
+          pattern: bitwarden-android-*
+          merge-multiple: true
+          path: artifacts
+
+      - name: Verify both variants before publishing
+        run: |
+          set -euo pipefail
+          test -s "artifacts/Bitwarden-${LATEST_ANDROID_TAG}-standard.apk"
+          test -s "artifacts/Bitwarden-${LATEST_ANDROID_TAG}-hyperos.apk"
+          ls -lh artifacts/*.apk
+          sha256sum artifacts/*.apk
+
+      - name: Upload both variants to one GitHub Release
+        run: |
+          set -euo pipefail
+          tag="${LATEST_ANDROID_TAG}"
+          standard="artifacts/Bitwarden-${tag}-standard.apk"
+          hyperos="artifacts/Bitwarden-${tag}-hyperos.apk"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" \
+              --notes "$tag [Original Changelog](https://github.com/bitwarden/android/releases/tag/$tag)"
+          fi
+          gh release upload "$tag" "$standard" "$hyperos" --repo "$GITHUB_REPOSITORY" --clobber
+          # Only retire the legacy APK AFTER both replacements were published.
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name' | grep -Fxq "com.x8bit.bitwarden.apk"; then
+            gh release delete-asset "$tag" "com.x8bit.bitwarden.apk" \
+              --repo "$GITHUB_REPOSITORY" --yes
+          fi
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name'
+

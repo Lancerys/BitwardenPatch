@@ -49,10 +49,12 @@ Android 工作流会自动：
 
 - 拉取 `bitwarden/android`
 - 获取最新 Android 对应 tag
-- 应用 `patches/android/hasPremium.patch`
+- 对两个版本均应用 `patches/android/hasPremium.patch`
+- HyperOS 版额外应用 `patches/android/hyperosUnlockFirst.patch`，解决锁屏状态的 Passkey 入口缺失问题
 - 配置 JDK、Ruby、Gradle、Fastlane
-- 使用签名配置生成 release APK
-- 上传到 GitHub Releases
+- 使用同一签名与递增 versionCode，分别构建 `standard`、`hyperos` 两种 APK
+- 两种 APK 构建成功后，一起上传到 GitHub Releases，可覆盖安装但不能同时安装
+- 原有浏览器扩展构建不受影响
 
 对应文件：
 
@@ -134,10 +136,12 @@ Browser workflow 通常不需要 Android 那些签名 secrets，配置成本更�
 .github/workflows/
   build-android.yml
   build-browser.yml
+  apk-size-audit.yml
 
 patches/
   android/
     hasPremium.patch
+    hyperosUnlockFirst.patch
   browser/
     hasPremiumPersonally.patch
 ```
@@ -156,3 +160,12 @@ patches/
 
 ```
 ```
+
+## Android 双版本说明
+
+- `Bitwarden-vX.Y.Z-bwpm-standard.apk`：原始 Passkey 流程，加 Premium 补丁。
+- `Bitwarden-vX.Y.Z-bwpm-hyperos.apk`：Premium 补丁加 HyperOS Unlock-First A 兼容补丁。
+- 两种 APK 包名、签名和 versionCode 一致；可覆盖切换，不能同时安装。
+- A 实验分支保留，不再维护 B Warm-Cache 实验。
+- 新上游版本若不能干净应用补丁，Android CI 将直接失败而非悄悄删除修复。
+- `APK Size Regression Audit` 可以对比历史版本 APK 的 ZIP 内部条目，定位体积增长。
