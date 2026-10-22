@@ -75,7 +75,7 @@ jobs:
           Path("upstream-vs-fork-report.md").write_text(report,encoding="utf-8")
           PY
       - name: Upload forensic report
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: upstream-vs-fork-size-forensics
           path: upstream-vs-fork-report.md
