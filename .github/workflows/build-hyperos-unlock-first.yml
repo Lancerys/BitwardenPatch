@@ -24,7 +24,7 @@ jobs:
       UPSTREAM_TAG: v2026.10.0-bwpm
     steps:
       - name: Check out patch repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Clone pinned Bitwarden source
         run: |
@@ -47,7 +47,7 @@ jobs:
           echo 'Both patches applied.'
 
       - name: Configure JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -82,10 +82,8 @@ jobs:
             echo 'Unable to discover stable workflow run number; refusing to build an APK with an unknown versionCode.'
             exit 1
           fi
-          stable_code=$((11000 + stable_run_number))
+          stable_code=$((12000 + stable_run_number))
           version_code=$((stable_code + 2))
-          # The already-installed B experiment was confirmed as versionCode 11042.
-          if (( version_code <= 11042 )); then version_code=11043; fi
           echo "version_code=${version_code}" >> "$GITHUB_OUTPUT"
           echo "Experiment APK versionCode=${version_code}"
 
@@ -137,7 +135,7 @@ jobs:
           ls -lh android/app/build/outputs/apk/standard/release/*.apk
 
       - name: Upload experiment APK only (no Release)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: bitwarden-hyperos-unlock-first-a
           path: android/app/build/outputs/apk/standard/release/*.apk
