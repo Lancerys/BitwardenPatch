@@ -1,0 +1,82 @@
+name: Compare Official and Patched APK Native Libraries
+on:
+  push:
+    branches:
+      - experiment/hyperos-unlock-first
+    paths:
+      - .github/workflows/audit-upstream-apk.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  apk-forensics:
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download official and fork APK for the same upstream tag
+        run: |
+          set -euo pipefail
+          mkdir -p original fork
+          gh release download v2026.10.0-bwpm --repo bitwarden/android \
+            --pattern "com.x8bit.bitwarden.apk" --dir original
+          gh release download v2026.10.0-bwpm --repo Lancerys/BitwardenPatch \
+            --pattern "com.x8bit.bitwarden.apk" --dir fork
+          ls -lh original/* fork/*
+      - name: Compare ZIP entries and ELF sections
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          from zipfile import ZipFile
+          targets={"official":"original/com.x8bit.bitwarden.apk",
+                   "self-built":"fork/com.x8bit.bitwarden.apk"}
+          zips={key:ZipFile(file) for key,file in targets.items()}
+          entries={key:{entry.filename:entry for entry in z.infolist()}
+                   for key,z in zips.items()}
+          def mb(v): return f"{v/1048576:.2f} MiB"
+          out=["# Upstream vs fork Android APK (v2026.10.0-bwpm)",""]
+          for key,filename in targets.items():
+              out.append(f"{key}: {mb(Path(filename).stat().st_size)}")
+          out += ["","## Top APK compressed-size differences",""]
+          allfiles=set().union(*[set(d) for d in entries.values()])
+          def sized(path,side):
+              item=entries[side].get(path)
+              return item.compress_size if item else 0
+          diffs=sorted(allfiles,key=lambda name: sized(name,"self-built")-sized(name,"official"),reverse=True)
+          for path in diffs[:35]:
+              old=sized(path,"official")
+              new=sized(path,"self-built")
+              out.append(f"- {path}: {mb(old)} -> {mb(new)}, delta {(new-old)/1048576:+.2f} MiB")
+          out += ["", "## Native library details (compressed and uncompressed)",""]
+          native=sorted(path for path in allfiles if path.startswith("lib/") and path.endswith(".so"))
+          for path in native:
+              old=entries["official"].get(path)
+              new=entries["self-built"].get(path)
+              if not old or not new: continue
+              if abs(new.compress_size-old.compress_size) > 1048576:
+                  out.append(f"- {path}: compressed {mb(old.compress_size)} -> {mb(new.compress_size)}; "
+                             f"raw {mb(old.file_size)} -> {mb(new.file_size)}")
+          out += ["", "## ARM64 ELF debug and symbol sections", ""]
+          path="lib/arm64-v8a/libbitwarden_uniffi.so"
+          for key,zipfile in zips.items():
+              if path not in entries[key]: continue
+              native_path=Path(f"{key}.so")
+              native_path.write_bytes(zipfile.read(path))
+              p=subprocess.run(["readelf","-SW",str(native_path)],
+                               capture_output=True,text=True)
+              out.append(f"### {key} ({mb(native_path.stat().st_size)})")
+              interesting=[line for line in p.stdout.splitlines()
+                           if any(x in line for x in [".debug", ".symtab", ".strtab", ".gnu_debuglink", ".text", ".rodata", ".eh_frame"])]
+              out.extend(["```text",*interesting,"```"] if interesting else ["No ELF sections found (readelf status "+str(p.returncode)+")"])
+              native_path.unlink()
+          report="\n".join(out)+"\n"
+          print(report)
+          Path("upstream-vs-fork-report.md").write_text(report,encoding="utf-8")
+          PY
+      - name: Upload forensic report
+        uses: actions/upload-artifact@v5
+        with:
+          name: upstream-vs-fork-size-forensics
+          path: upstream-vs-fork-report.md
+          if-no-files-found: error
