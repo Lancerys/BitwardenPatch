@@ -68,19 +68,16 @@ jobs:
           bundle config set path vendor/bundle
           bundle install --jobs 4 --retry 3
 
-      - name: Set install-compatible versionCode for later A-patched overlay
+      - name: Set LOW fixed versionCode (below published Standard and HyperOS)
         working-directory: android
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          stable_run_number="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/build-android.yml/runs?branch=main&per_page=1" --jq '.workflow_runs[0].run_number')"
-          [[ "$stable_run_number" =~ ^[0-9]+$ ]]
-          # Keep this formula IDENTICAL to the existing HyperOS A experiment workflow.
-          version_code=$((12000 + stable_run_number + 2))
-          echo "Clean and A experiment versionCode=${version_code}"
+          # Official patched releases currently use versionCode 12045.
+          # Use 10000 for a clean login, then upgrade IN PLACE to the release APK.
+          # Android forbids downgrading an existing higher-version APK in place.
+          echo 'Clean login baseline versionCode=10000; patched release=12045 (as of 2026-10-24).'
           bundle exec fastlane setBuildVersionInfo \
-            versionCode:"${version_code}" \
+            versionCode:10000 \
             versionName:"2026.10.0"
 
       - name: Configure existing keystore and Firebase release config
@@ -125,14 +122,14 @@ jobs:
             exit 1
           fi
           mkdir -p dist
-          cp "${apks[0]}" dist/Bitwarden-2026.10.0-CLEAN-SAME-SIGNATURE.apk
+          cp "${apks[0]}" dist/Bitwarden-2026.10.0-CLEAN-vc10000-SAME-SIGNATURE.apk
           ls -lh dist/*.apk
           sha256sum dist/*.apk
 
       - name: Upload clean signed APK (Actions artifact only)
         uses: actions/upload-artifact@v6
         with:
-          name: bitwarden-clean-signed-login-test
+          name: bitwarden-clean-signed-login-test-vc10000
           path: dist/*.apk
           if-no-files-found: error
           retention-days: 14
