@@ -1,4 +1,4 @@
-name: Build Android
+name: Build Android (Standard + HyperOS)
 
 on:
   workflow_call:
@@ -14,8 +14,9 @@ on:
   workflow_dispatch:
   push:
     branches: [master, main]
-    paths-ignore:
-      - ".github/workflows/build-browser.yml"
+    paths:
+      - ".github/workflows/build-android.yml"
+      - "patches/android/**"
   schedule:
     # Every Sunday 12:00 UTC
     - cron: "0 12 * * 0"
@@ -34,13 +35,13 @@ defaults:
 jobs:
   setup:
     name: Setup
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
       latest_android_tag: ${{ steps.gen_vars.outputs.latest_android_tag }}
 
     steps:
       - name: Check out repo
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@v6
 
       - name: Clone upstream Android repo
         run: |
@@ -65,10 +66,14 @@ jobs:
           echo "Resolved latest_android_tag=${latest_android_tag}"
 
   build-source:
-    name: Build Android
-    runs-on: ubuntu-22.04
+    name: Build Android (${{ matrix.variant }})
+    runs-on: ubuntu-24.04
     needs:
       - setup
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [standard, hyperos]
 
     env:
       LATEST_ANDROID_TAG: ${{ needs.setup.outputs.latest_android_tag }}
@@ -76,16 +81,7 @@ jobs:
 
     steps:
       - name: Check out repo
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Validate required secrets
-        run: |
-          set -euo pipefail
-
-          test -n "${{ secrets.SIGN_KEYSTORE_BASE64 }}" || { echo "SIGN_KEYSTORE_BASE64 is empty"; exit 1; }
-          test -n "${{ secrets.GOOGLE_SERVICES_JSON }}" || { echo "GOOGLE_SERVICES_JSON is empty"; exit 1; }
-          test -n "${{ secrets.KEYSTORE_PASSWORD }}" || { echo "KEYSTORE_PASSWORD is empty"; exit 1; }
-          test -n "${{ secrets.KEY_PASSWORD }}" || { echo "KEY_PASSWORD is empty"; exit 1; }
+        uses: actions/checkout@v6
 
       - name: Clone upstream Android repo
         run: |
@@ -110,13 +106,13 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
 
       - name: Configure Ruby
-        uses: ruby/setup-ruby@44511735964dcb71245e7e55f72539531f7bc0eb # v1.257.0
+        uses: ruby/setup-ruby@9eb537ca036ebaed86729dcb9309076e4c5c3b74 # v1.314.0 (Node.js 24)
         with:
           ruby-version: "3.4.2"
           bundler-cache: false
 
       - name: Cache Gradle files
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.gradle/caches
@@ -126,16 +122,23 @@ jobs:
             ${{ runner.os }}-gradle-v3-${{ env.JAVA_VERSION }}-
             ${{ runner.os }}-gradle-v3-
 
-      - name: Cache build output
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        with:
-          path: |
-            ${{ github.workspace }}/build-cache
-          key: ${{ runner.os }}-build-cache-${{ github.ref_name }}-${{ env.LATEST_ANDROID_TAG }}
-          restore-keys: |
-            ${{ runner.os }}-build-cache-${{ github.ref_name }}-
-            ${{ runner.os }}-build-cache-
-
+      - name: Ensure AGP 9.4 matching NDK for native ELF stripping
+        run: |
+          set -euo pipefail
+          # AGP 9.4 defaults to NDK r28c; GitHub runners do not preinstall this version.
+          ndk_version="28.2.13676358"
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?}}"
+          llvm_strip="${sdk_root}/ndk/${ndk_version}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          if [[ ! -x "$llvm_strip" ]]; then
+            sdk_manager="${sdk_root}/cmdline-tools/latest/bin/sdkmanager"
+            if [[ ! -x "$sdk_manager" ]]; then
+              sdk_manager="$(find "${sdk_root}/cmdline-tools" -maxdepth 3 -type f -name sdkmanager | head -n 1)"
+            fi
+            test -x "$sdk_manager"
+            "$sdk_manager" --install "ndk;${ndk_version}" --channel=0 < /dev/null
+          fi
+          test -x "$llvm_strip"
+          echo "Ready to strip native libraries with NDK ${ndk_version}."
       - name: Install Bundler and dependencies
         working-directory: android
         run: |
@@ -145,19 +148,32 @@ jobs:
           bundle config set path vendor/bundle
           bundle install --jobs 4 --retry 3
 
-      - name: Set version from tag
+      - name: Set EXACT official versionName from upstream release tag
         working-directory: android
         run: |
           set -euo pipefail
 
+          # IMPORTANT: Bitwarden uses VERSION_NAME as the HTTP client-version header
+          # and SDK client version. Never add a standard/hyperos/premium suffix.
+          # Upstream release tags look like v2026.10.0-bwpm. Their versionName
+          # must be 2026.10.0 for BOTH APKs.
           TAG_NAME="${LATEST_ANDROID_TAG}"
+          if [[ "${TAG_NAME}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-bwpm$ ]]; then
+            VERSION_NAME="${BASH_REMATCH[1]}"
+          else
+            echo "Unexpected upstream tag format: ${TAG_NAME}; refusing an unsafe versionName."
+            exit 1
+          fi
 
-          VERSION_NAME="${TAG_NAME#v}"
-          VERSION_NAME="${VERSION_NAME%-bwpm}"
+          # versionCode is only an Android installation upgrade counter.
+          # Keep it monotonic so existing signed APKs (such as 12045) can update
+          # in place. It does NOT change the server-facing official versionName.
+          # Both variants share this versionCode.
+          VERSION_CODE=$((12000 + GITHUB_RUN_NUMBER))
 
-          VERSION_CODE=$((11000 + GITHUB_RUN_NUMBER))
-
-          echo "Setting Version: ${VERSION_NAME} (${VERSION_CODE})"
+          echo "Setting OFFICIAL versionName=${VERSION_NAME}; versionCode=${VERSION_CODE}; variant=${{ matrix.variant }}"
+          echo "EXPECTED_VERSION_NAME=${VERSION_NAME}" >> "${GITHUB_ENV}"
+          echo "EXPECTED_VERSION_CODE=${VERSION_CODE}" >> "${GITHUB_ENV}"
 
           bundle exec fastlane setBuildVersionInfo \
             versionCode:"${VERSION_CODE}" \
@@ -174,19 +190,31 @@ jobs:
           git apply --check hasPremium.patch
           git apply -v hasPremium.patch
 
+          if [[ "${{ matrix.variant }}" == "hyperos" ]]; then
+            test -f ../patches/android/hyperosUnlockFirst.patch
+            git apply --check ../patches/android/hyperosUnlockFirst.patch
+            git apply --verbose ../patches/android/hyperosUnlockFirst.patch
+          fi
+          git diff --check
+
       - name: Prepare signing and Firebase files
         working-directory: android
+        env:
+          SIGN_KEYSTORE_BASE64: ${{ secrets.SIGN_KEYSTORE_BASE64 }}
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -euo pipefail
-
-          mkdir -p ./keystores
-          mkdir -p ./app/src/standardRelease
-
-          printf '%s' '${{ secrets.SIGN_KEYSTORE_BASE64 }}' | base64 -d > ./keystores/leamocc.jks
-          printf '%s' '${{ secrets.GOOGLE_SERVICES_JSON }}' | base64 -d > ./app/src/standardRelease/google-services.json
-
-          test -s ./keystores/leamocc.jks || { echo "Decoded keystore is empty"; exit 1; }
-          test -s ./app/src/standardRelease/google-services.json || { echo "Decoded google-services.json is empty"; exit 1; }
+          test -n "$SIGN_KEYSTORE_BASE64"
+          test -n "$GOOGLE_SERVICES_JSON"
+          test -n "$KEYSTORE_PASSWORD"
+          test -n "$KEY_PASSWORD"
+          mkdir -p keystores app/src/standardRelease
+          printf '%s' "$SIGN_KEYSTORE_BASE64" | base64 -d > keystores/leamocc.jks
+          printf '%s' "$GOOGLE_SERVICES_JSON" | base64 -d > app/src/standardRelease/google-services.json
+          test -s keystores/leamocc.jks
+          test -s app/src/standardRelease/google-services.json
 
       - name: Generate release Play Store APK
         working-directory: android
@@ -203,30 +231,109 @@ jobs:
             keyAlias:key0 \
             keyPassword:"${KEY_PASSWORD}"
 
-      - name: Verify APK output
+      - name: Verify Bitwarden SDK symbols stripped from release APK
         working-directory: android
         run: |
           set -euo pipefail
-
+          python3 - <<'PY'
+          from glob import glob
+          from pathlib import Path
+          from zipfile import ZipFile
+          import subprocess, tempfile
+          apks=glob("app/build/outputs/apk/standard/release/*.apk")
+          assert len(apks) == 1, apks
+          with ZipFile(apks[0]) as archive:
+              lib=archive.read("lib/arm64-v8a/libbitwarden_uniffi.so")
+          with tempfile.TemporaryDirectory() as tmp:
+              so=Path(tmp)/"libbitwarden_uniffi.so"
+              so.write_bytes(lib)
+              elf=subprocess.run(["readelf","-SW",str(so)],capture_output=True,text=True,check=True)
+          assert ".symtab" not in elf.stdout and ".strtab" not in elf.stdout, "AGP failed to strip native ELF symbol tables"
+          print(f"Stripped ARM64 library verified: {len(lib)/1048576:.2f} MiB")
+          PY
+      - name: Verify built APK reports official versionName and compatible versionCode
+        working-directory: android
+        run: |
+          set -euo pipefail
           shopt -s nullglob
           files=(app/build/outputs/apk/standard/release/*.apk)
-
-          if [[ ${#files[@]} -eq 0 ]]; then
-            echo "No APK found in app/build/outputs/apk/standard/release/"
+          if (( ${#files[@]} != 1 )); then
+            echo "Expected exactly one Android APK, got ${#files[@]}."
             exit 1
           fi
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?}}"
+          aapt_bin="$(find "${sdk_root}/build-tools" -maxdepth 2 -type f -name aapt | sort -V | tail -n 1)"
+          test -x "${aapt_bin}"
+          metadata="$("${aapt_bin}" dump badging "${files[0]}" | head -n 1)"
+          echo "APK package identity: ${metadata}"
+          [[ "${metadata}" == *"name='com.x8bit.bitwarden'"* ]] || { echo 'Unexpected package'; exit 1; }
+          [[ "${metadata}" == *"versionCode='${EXPECTED_VERSION_CODE}'"* ]] || { echo 'Unexpected versionCode'; exit 1; }
+          [[ "${metadata}" == *"versionName='${EXPECTED_VERSION_NAME}'"* ]] || { echo 'Non-official versionName found in APK'; exit 1; }
+          echo 'Verified: official Bitwarden versionName (no suffix) and expected versionCode.'
 
-          printf 'Generated APK(s):\n'
-          printf '%s\n' "${files[@]}"
+      - name: Stage named variant APK
+        working-directory: android
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(app/build/outputs/apk/standard/release/*.apk)
+          if (( ${#files[@]} != 1 )); then
+            echo "Expected exactly one Android APK, got ${#files[@]}."
+            exit 1
+          fi
+          mkdir -p ../dist
+          cp "${files[0]}" "../dist/Bitwarden-${LATEST_ANDROID_TAG}-${{ matrix.variant }}.apk"
+          ls -lh ../dist/*.apk
+          sha256sum ../dist/*.apk
 
-      - name: Create release
-        uses: ncipollo/release-action@2c591bcc8ecdcd2db72b97d6147f871fcd833ba5 # v1.14.0
+      - name: Upload variant APK artifact
+        uses: actions/upload-artifact@v6
         with:
-          artifacts: "android/app/build/outputs/apk/standard/release/*.apk"
-          tag: ${{ env.LATEST_ANDROID_TAG }}
-          name: ${{ env.LATEST_ANDROID_TAG }}
-          body: ${{ env.LATEST_ANDROID_TAG }} [Original Changelog](https://github.com/bitwarden/android/releases/tag/${{ env.LATEST_ANDROID_TAG }})
-          token: ${{ secrets.GITHUB_TOKEN }}
-          draft: false
-          allowUpdates: false
-          makeLatest: true
+          name: bitwarden-android-${{ matrix.variant }}
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish both Android variants
+    runs-on: ubuntu-24.04
+    needs: [setup, build-source]
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LATEST_ANDROID_TAG: ${{ needs.setup.outputs.latest_android_tag }}
+    steps:
+      - name: Download both APK artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: bitwarden-android-*
+          merge-multiple: true
+          path: artifacts
+
+      - name: Verify both variants before publishing
+        run: |
+          set -euo pipefail
+          test -s "artifacts/Bitwarden-${LATEST_ANDROID_TAG}-standard.apk"
+          test -s "artifacts/Bitwarden-${LATEST_ANDROID_TAG}-hyperos.apk"
+          ls -lh artifacts/*.apk
+          sha256sum artifacts/*.apk
+
+      - name: Upload both variants to one GitHub Release
+        run: |
+          set -euo pipefail
+          tag="${LATEST_ANDROID_TAG}"
+          standard="artifacts/Bitwarden-${tag}-standard.apk"
+          hyperos="artifacts/Bitwarden-${tag}-hyperos.apk"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" \
+              --notes "$tag [Original Changelog](https://github.com/bitwarden/android/releases/tag/$tag)"
+          fi
+          gh release upload "$tag" "$standard" "$hyperos" --repo "$GITHUB_REPOSITORY" --clobber
+          # Only retire the legacy APK AFTER both replacements were published.
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name' | grep -Fxq "com.x8bit.bitwarden.apk"; then
+            gh release delete-asset "$tag" "com.x8bit.bitwarden.apk" \
+              --repo "$GITHUB_REPOSITORY" --yes
+          fi
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name'
+
