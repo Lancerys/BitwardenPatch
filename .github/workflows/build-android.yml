@@ -166,22 +166,32 @@ jobs:
           bundle config set path vendor/bundle
           bundle install --jobs 4 --retry 3
 
-      - name: Set version from tag
+      - name: Set EXACT official versionName from upstream release tag
         working-directory: android
         run: |
           set -euo pipefail
 
+          # IMPORTANT: Bitwarden uses VERSION_NAME as the HTTP client-version header
+          # and SDK client version. Never add a standard/hyperos/premium suffix.
+          # Upstream release tags look like v2026.10.0-bwpm. Their versionName
+          # must be 2026.10.0 for BOTH APKs.
           TAG_NAME="${LATEST_ANDROID_TAG}"
+          if [[ "${TAG_NAME}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-bwpm$ ]]; then
+            VERSION_NAME="${BASH_REMATCH[1]}"
+          else
+            echo "Unexpected upstream tag format: ${TAG_NAME}; refusing an unsafe versionName."
+            exit 1
+          fi
 
-          VERSION_NAME="${TAG_NAME#v}"
-          VERSION_NAME="${VERSION_NAME%-bwpm}"
-          VERSION_NAME="${VERSION_NAME}-${{ matrix.variant }}"
-
-          # Reserve a higher versionCode range for safe in-place updates.
-          # Both APK variants use the SAME value for easy switching.
+          # versionCode is only an Android installation upgrade counter.
+          # Keep it monotonic so existing signed APKs (such as 12045) can update
+          # in place. It does NOT change the server-facing official versionName.
+          # Both variants share this versionCode.
           VERSION_CODE=$((12000 + GITHUB_RUN_NUMBER))
 
-          echo "Setting Version: ${VERSION_NAME} (${VERSION_CODE})"
+          echo "Setting OFFICIAL versionName=${VERSION_NAME}; versionCode=${VERSION_CODE}; variant=${{ matrix.variant }}"
+          echo "EXPECTED_VERSION_NAME=${VERSION_NAME}" >> "${GITHUB_ENV}"
+          echo "EXPECTED_VERSION_CODE=${VERSION_CODE}" >> "${GITHUB_ENV}"
 
           bundle exec fastlane setBuildVersionInfo \
             versionCode:"${VERSION_CODE}" \
@@ -269,6 +279,26 @@ jobs:
 
           printf 'Generated APK(s):\n'
           printf '%s\n' "${files[@]}"
+
+      - name: Verify built APK reports official versionName and compatible versionCode
+        working-directory: android
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(app/build/outputs/apk/standard/release/*.apk)
+          if (( ${#files[@]} != 1 )); then
+            echo "Expected exactly one Android APK, got ${#files[@]}."
+            exit 1
+          fi
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?}}"
+          aapt_bin="$(find "${sdk_root}/build-tools" -maxdepth 2 -type f -name aapt | sort -V | tail -n 1)"
+          test -x "${aapt_bin}"
+          metadata="$("${aapt_bin}" dump badging "${files[0]}" | head -n 1)"
+          echo "APK package identity: ${metadata}"
+          [[ "${metadata}" == *"name='com.x8bit.bitwarden'"* ]] || { echo 'Unexpected package'; exit 1; }
+          [[ "${metadata}" == *"versionCode='${EXPECTED_VERSION_CODE}'"* ]] || { echo 'Unexpected versionCode'; exit 1; }
+          [[ "${metadata}" == *"versionName='${EXPECTED_VERSION_NAME}'"* ]] || { echo 'Non-official versionName found in APK'; exit 1; }
+          echo 'Verified: official Bitwarden versionName (no suffix) and expected versionCode.'
 
       - name: Stage named variant APK
         working-directory: android
