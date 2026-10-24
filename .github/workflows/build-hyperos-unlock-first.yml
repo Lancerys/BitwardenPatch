@@ -94,7 +94,7 @@ jobs:
           # User's clean login APK: 10000. Formal Standard/HyperOS: 12045.
           # Permit clean -> TOTP A test -> formal, without version downgrade.
           echo 'version_code=10001' >> "$GITHUB_OUTPUT"
-          echo 'TOTP A test versionCode=10001 (clean=10000; formal=12045)'
+          echo 'TOTP A test versionCode=10001 (clean=10000; formal=12045); versionName 2026.10.0 (no suffix)'
       - name: Set experiment version
         working-directory: android
         env:
@@ -103,7 +103,7 @@ jobs:
           set -euo pipefail
           bundle exec fastlane setBuildVersionInfo \
             versionCode:"${EXPERIMENT_VERSION_CODE}" \
-            versionName:"2026.10.0-hyperos-totp-only"
+            versionName:"2026.10.0"
 
       - name: Validate signing and Firebase secrets
         env:
