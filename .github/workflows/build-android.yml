@@ -14,8 +14,9 @@ on:
   workflow_dispatch:
   push:
     branches: [master, main]
-    paths-ignore:
-      - ".github/workflows/build-browser.yml"
+    paths:
+      - ".github/workflows/build-android.yml"
+      - "patches/android/**"
   schedule:
     # Every Sunday 12:00 UTC
     - cron: "0 12 * * 0"
@@ -82,15 +83,6 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@v6
 
-      - name: Validate required secrets
-        run: |
-          set -euo pipefail
-
-          test -n "${{ secrets.SIGN_KEYSTORE_BASE64 }}" || { echo "SIGN_KEYSTORE_BASE64 is empty"; exit 1; }
-          test -n "${{ secrets.GOOGLE_SERVICES_JSON }}" || { echo "GOOGLE_SERVICES_JSON is empty"; exit 1; }
-          test -n "${{ secrets.KEYSTORE_PASSWORD }}" || { echo "KEYSTORE_PASSWORD is empty"; exit 1; }
-          test -n "${{ secrets.KEY_PASSWORD }}" || { echo "KEY_PASSWORD is empty"; exit 1; }
-
       - name: Clone upstream Android repo
         run: |
           git clone https://github.com/bitwarden/android.git
@@ -129,16 +121,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-v3-${{ env.JAVA_VERSION }}-
             ${{ runner.os }}-gradle-v3-
-
-      - name: Cache build output
-        uses: actions/cache@v5
-        with:
-          path: |
-            ${{ github.workspace }}/build-cache
-          key: ${{ runner.os }}-build-cache-${{ github.ref_name }}-${{ env.LATEST_ANDROID_TAG }}
-          restore-keys: |
-            ${{ runner.os }}-build-cache-${{ github.ref_name }}-
-            ${{ runner.os }}-build-cache-
 
       - name: Ensure AGP 9.4 matching NDK for native ELF stripping
         run: |
@@ -217,17 +199,22 @@ jobs:
 
       - name: Prepare signing and Firebase files
         working-directory: android
+        env:
+          SIGN_KEYSTORE_BASE64: ${{ secrets.SIGN_KEYSTORE_BASE64 }}
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -euo pipefail
-
-          mkdir -p ./keystores
-          mkdir -p ./app/src/standardRelease
-
-          printf '%s' '${{ secrets.SIGN_KEYSTORE_BASE64 }}' | base64 -d > ./keystores/leamocc.jks
-          printf '%s' '${{ secrets.GOOGLE_SERVICES_JSON }}' | base64 -d > ./app/src/standardRelease/google-services.json
-
-          test -s ./keystores/leamocc.jks || { echo "Decoded keystore is empty"; exit 1; }
-          test -s ./app/src/standardRelease/google-services.json || { echo "Decoded google-services.json is empty"; exit 1; }
+          test -n "$SIGN_KEYSTORE_BASE64"
+          test -n "$GOOGLE_SERVICES_JSON"
+          test -n "$KEYSTORE_PASSWORD"
+          test -n "$KEY_PASSWORD"
+          mkdir -p keystores app/src/standardRelease
+          printf '%s' "$SIGN_KEYSTORE_BASE64" | base64 -d > keystores/leamocc.jks
+          printf '%s' "$GOOGLE_SERVICES_JSON" | base64 -d > app/src/standardRelease/google-services.json
+          test -s keystores/leamocc.jks
+          test -s app/src/standardRelease/google-services.json
 
       - name: Generate release Play Store APK
         working-directory: android
@@ -264,22 +251,6 @@ jobs:
           assert ".symtab" not in elf.stdout and ".strtab" not in elf.stdout, "AGP failed to strip native ELF symbol tables"
           print(f"Stripped ARM64 library verified: {len(lib)/1048576:.2f} MiB")
           PY
-      - name: Verify APK output
-        working-directory: android
-        run: |
-          set -euo pipefail
-
-          shopt -s nullglob
-          files=(app/build/outputs/apk/standard/release/*.apk)
-
-          if [[ ${#files[@]} -eq 0 ]]; then
-            echo "No APK found in app/build/outputs/apk/standard/release/"
-            exit 1
-          fi
-
-          printf 'Generated APK(s):\n'
-          printf '%s\n' "${files[@]}"
-
       - name: Verify built APK reports official versionName and compatible versionCode
         working-directory: android
         run: |
