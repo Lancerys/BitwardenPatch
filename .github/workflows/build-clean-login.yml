@@ -1,0 +1,138 @@
+name: Build Clean Signed Bitwarden (Login Test)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [experiment/hyperos-unlock-first]
+    paths:
+      - .github/workflows/build-clean-login.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  clean:
+    name: Unmodified upstream Bitwarden signed with existing keystore
+    runs-on: ubuntu-24.04
+    env:
+      UPSTREAM_TAG: v2026.10.0-bwpm
+    steps:
+      - name: Check out CI repository
+        uses: actions/checkout@v6
+
+      - name: Clone exact unmodified upstream Bitwarden
+        run: |
+          set -euo pipefail
+          git clone https://github.com/bitwarden/android.git android
+          cd android
+          git fetch --tags --force
+          git checkout --detach "${UPSTREAM_TAG}"
+          git diff --exit-code
+          git diff --cached --exit-code
+          echo "Unmodified upstream source verified: $(git rev-parse HEAD)"
+
+      - name: Configure Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Configure Ruby
+        uses: ruby/setup-ruby@9eb537ca036ebaed86729dcb9309076e4c5c3b74 # Node 24
+        with:
+          ruby-version: "3.4.2"
+          bundler-cache: false
+
+      - name: Install matching Android NDK
+        run: |
+          set -euo pipefail
+          ndk_version="28.2.13676358"
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?}}"
+          llvm_strip="${sdk_root}/ndk/${ndk_version}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          if [[ ! -x "$llvm_strip" ]]; then
+            sdk_manager="${sdk_root}/cmdline-tools/latest/bin/sdkmanager"
+            if [[ ! -x "$sdk_manager" ]]; then
+              sdk_manager="$(find "${sdk_root}/cmdline-tools" -maxdepth 3 -type f -name sdkmanager | head -n 1)"
+            fi
+            test -x "$sdk_manager"
+            "$sdk_manager" --install "ndk;${ndk_version}" --channel=0 < /dev/null
+          fi
+          test -x "$llvm_strip"
+
+      - name: Install Fastlane and Bundler
+        working-directory: android
+        run: |
+          set -euo pipefail
+          gem install bundler:2.2.27
+          bundle config set path vendor/bundle
+          bundle install --jobs 4 --retry 3
+
+      - name: Set install-compatible versionCode for later A-patched overlay
+        working-directory: android
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          stable_run_number="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/build-android.yml/runs?branch=main&per_page=1" --jq '.workflow_runs[0].run_number')"
+          [[ "$stable_run_number" =~ ^[0-9]+$ ]]
+          # Keep this formula IDENTICAL to the existing HyperOS A experiment workflow.
+          version_code=$((12000 + stable_run_number + 2))
+          echo "Clean and A experiment versionCode=${version_code}"
+          bundle exec fastlane setBuildVersionInfo \
+            versionCode:"${version_code}" \
+            versionName:"2026.10.0"
+
+      - name: Configure existing keystore and Firebase release config
+        env:
+          SIGN_KEYSTORE_BASE64: ${{ secrets.SIGN_KEYSTORE_BASE64 }}
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$SIGN_KEYSTORE_BASE64"
+          test -n "$GOOGLE_SERVICES_JSON"
+          test -n "$KEYSTORE_PASSWORD"
+          test -n "$KEY_PASSWORD"
+          mkdir -p android/keystores android/app/src/standardRelease
+          printf '%s' "$SIGN_KEYSTORE_BASE64" | base64 -d > android/keystores/leamocc.jks
+          printf '%s' "$GOOGLE_SERVICES_JSON" | base64 -d > android/app/src/standardRelease/google-services.json
+          test -s android/keystores/leamocc.jks
+          test -s android/app/src/standardRelease/google-services.json
+
+      - name: Assemble clean APK using the SAME signing key alias
+        working-directory: android
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          bundle exec fastlane assemblePlayStoreReleaseApk \
+            storeFile:leamocc.jks \
+            storePassword:"${KEYSTORE_PASSWORD}" \
+            keyAlias:key0 \
+            keyPassword:"${KEY_PASSWORD}"
+
+      - name: Save identifiable clean APK without publishing a Release
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apks=(android/app/build/outputs/apk/standard/release/*.apk)
+          if (( ${#apks[@]} != 1 )); then
+            echo "Expected exactly one APK; got ${#apks[@]}"
+            exit 1
+          fi
+          mkdir -p dist
+          cp "${apks[0]}" dist/Bitwarden-2026.10.0-CLEAN-SAME-SIGNATURE.apk
+          ls -lh dist/*.apk
+          sha256sum dist/*.apk
+
+      - name: Upload clean signed APK (Actions artifact only)
+        uses: actions/upload-artifact@v6
+        with:
+          name: bitwarden-clean-signed-login-test
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 14
