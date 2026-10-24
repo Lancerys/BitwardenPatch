@@ -87,27 +87,14 @@ jobs:
           bundle config set path vendor/bundle
           bundle install --jobs 4 --retry 3
 
-      - name: Resolve versionCode using stable Android workflow
+      - name: Choose fixed low versionCode below formal Android releases
         id: installed_compatible_code
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # The experiment workflow starts its own run number from 1.
-          # Reusing that run number would make its APK older than the existing
-          # installed release (INSTALL_FAILED_VERSION_DOWNGRADE).
-          stable_run_number="$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/build-android.yml/runs?branch=main&per_page=1" \
-            --jq '.workflow_runs[0].run_number')"
-          if [[ ! "$stable_run_number" =~ ^[0-9]+$ ]]; then
-            echo 'Unable to discover stable workflow run number; refusing to build an APK with an unknown versionCode.'
-            exit 1
-          fi
-          stable_code=$((12000 + stable_run_number))
-          version_code=$((stable_code + 2))
-          echo "version_code=${version_code}" >> "$GITHUB_OUTPUT"
-          echo "Experiment APK versionCode=${version_code}"
-
+          # User's clean login APK: 10000. Formal Standard/HyperOS: 12045.
+          # Permit clean -> TOTP A test -> formal, without version downgrade.
+          echo 'version_code=10001' >> "$GITHUB_OUTPUT"
+          echo 'TOTP A test versionCode=10001 (clean=10000; formal=12045)'
       - name: Set experiment version
         working-directory: android
         env:
