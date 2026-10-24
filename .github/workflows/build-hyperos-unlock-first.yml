@@ -1,4 +1,4 @@
-name: HyperOS Passkey Unlock-First A Experiment
+name: HyperOS A + TOTP-Only Login-Safe Test
 
 on:
   workflow_dispatch:
@@ -8,6 +8,7 @@ on:
     paths:
       - .github/workflows/build-hyperos-unlock-first.yml
       - patches/android/hyperosUnlockFirst.patch
+      - patches/android/totpOnly.patch
 
 permissions:
   contents: read
@@ -35,16 +36,20 @@ jobs:
           git checkout "${UPSTREAM_TAG}"
           echo "Upstream revision: $(git rev-parse HEAD)"
 
-      - name: Validate and apply the A unlock-first patch
+      - name: Apply TOTP-only client patch and HyperOS A (no auth/token changes)
         working-directory: android
         run: |
           set -euo pipefail
-          git apply --check ../patches/android/hasPremium.patch
-          git apply ../patches/android/hasPremium.patch
+          git apply --check ../patches/android/totpOnly.patch
+          git apply --verbose ../patches/android/totpOnly.patch
           git apply --check ../patches/android/hyperosUnlockFirst.patch
           git apply --verbose ../patches/android/hyperosUnlockFirst.patch
           git diff --check
-          echo 'Both patches applied.'
+          if git diff --name-only | grep -q '^app/src/main/kotlin/com/x8bit/bitwarden/data/auth/'; then
+            echo 'ABORT: this experiment must never patch authentication or account state.'
+            exit 1
+          fi
+          echo 'Local TOTP-only + HyperOS A patches applied; authentication code untouched.'
 
       - name: Configure JDK 21
         uses: actions/setup-java@v5
@@ -111,7 +116,7 @@ jobs:
           set -euo pipefail
           bundle exec fastlane setBuildVersionInfo \
             versionCode:"${EXPERIMENT_VERSION_CODE}" \
-            versionName:"2026.10.0-hyperos-a1"
+            versionName:"2026.10.0-hyperos-totp-only"
 
       - name: Validate signing and Firebase secrets
         env:
@@ -172,7 +177,7 @@ jobs:
       - name: Upload experiment APK only (no Release)
         uses: actions/upload-artifact@v6
         with:
-          name: bitwarden-hyperos-unlock-first-a
+          name: bitwarden-hyperos-a-totp-only
           path: android/app/build/outputs/apk/standard/release/*.apk
           if-no-files-found: error
           retention-days: 14
