@@ -3,14 +3,20 @@ name: Build Browser
 on:
   workflow_call:
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Rebuild even when all browser packages are already published'
+        required: false
+        default: false
+        type: boolean
   push:
     branches: [master, main]
     paths:
       - ".github/workflows/build-browser.yml"
       - "patches/browser/**"
   schedule:
-    # Every Sunday 12:00 UTC
-    - cron: "0 12 * * 0"
+    # Every day at 05:00 Singapore/Beijing time (21:00 UTC previous day)
+    - cron: "0 21 * * *"
 
 permissions:
   contents: write
@@ -29,6 +35,7 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       latest_browser_tag: ${{ steps.gen_vars.outputs.latest_browser_tag }}
+      should_build: ${{ steps.check_release.outputs.should_build }}
       node_version: ${{ steps.retrieve-node-version.outputs.node_version }}
 
     steps:
@@ -58,6 +65,30 @@ jobs:
           echo "latest_browser_tag=${latest_browser_tag}" >> "$GITHUB_OUTPUT"
           echo "Resolved latest_browser_tag=${latest_browser_tag}"
 
+      - name: Check whether browser release assets are already published
+        id: check_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST_TAG: ${{ steps.gen_vars.outputs.latest_browser_tag }}
+          FORCE_BUILD: ${{ inputs.force_build || false }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          should_build=true
+          # Preserve rebuilds on patch/workflow pushes and reusable workflow calls.
+          if [[ "$EVENT_NAME" != "push" && "$EVENT_NAME" != "workflow_call" && "$FORCE_BUILD" != "true" ]]; then
+            assets="$(gh release view "$LATEST_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+            if grep -Fxq "browser-source.zip" <<< "$assets" &&
+               grep -Fxq "dist-chrome.zip" <<< "$assets" &&
+               grep -Fxq "dist-edge.zip" <<< "$assets" &&
+               grep -Fxq "dist-firefox.zip" <<< "$assets" &&
+               grep -Fxq "dist-opera.zip" <<< "$assets"; then
+              should_build=false
+            fi
+          fi
+          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
+          echo "Upstream browser tag: $LATEST_TAG; build required: $should_build"
+
       - name: Get Node version
         id: retrieve-node-version
         working-directory: clients
@@ -82,6 +113,7 @@ jobs:
     runs-on: ubuntu-22.04
     needs:
       - setup
+    if: needs.setup.outputs.should_build == 'true'
     env:
       LATEST_BROWSER_TAG: ${{ needs.setup.outputs.latest_browser_tag }}
       NODE_VERSION: ${{ needs.setup.outputs.node_version }}
@@ -159,6 +191,7 @@ jobs:
     needs:
       - setup
       - build-source
+    if: needs.setup.outputs.should_build == 'true'
     env:
       LATEST_BROWSER_TAG: ${{ needs.setup.outputs.latest_browser_tag }}
       NODE_VERSION: ${{ needs.setup.outputs.node_version }}
@@ -233,6 +266,7 @@ jobs:
       - setup
       - build-source
       - build
+    if: needs.setup.outputs.should_build == 'true'
     env:
       LATEST_BROWSER_TAG: ${{ needs.setup.outputs.latest_browser_tag }}
 
