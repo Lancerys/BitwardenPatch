@@ -12,14 +12,20 @@ on:
       KEY_PASSWORD:
         required: true
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Rebuild even when both APKs are already published'
+        required: false
+        default: false
+        type: boolean
   push:
     branches: [master, main]
     paths:
       - ".github/workflows/build-android.yml"
       - "patches/android/**"
   schedule:
-    # Every Sunday 12:00 UTC
-    - cron: "0 12 * * 0"
+    # Every day at 05:00 Singapore/Beijing time (21:00 UTC previous day)
+    - cron: "0 21 * * *"
 
 permissions:
   contents: write
@@ -38,6 +44,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       latest_android_tag: ${{ steps.gen_vars.outputs.latest_android_tag }}
+      should_build: ${{ steps.check_release.outputs.should_build }}
 
     steps:
       - name: Check out repo
@@ -65,11 +72,33 @@ jobs:
           echo "latest_android_tag=${latest_android_tag}" >> "$GITHUB_OUTPUT"
           echo "Resolved latest_android_tag=${latest_android_tag}"
 
+      - name: Check whether both Android APKs are already published
+        id: check_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LATEST_TAG: ${{ steps.gen_vars.outputs.latest_android_tag }}
+          FORCE_BUILD: ${{ inputs.force_build || false }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          should_build=true
+          # Keep the existing behavior: source/patch pushes and workflow calls rebuild.
+          if [[ "$EVENT_NAME" != "push" && "$EVENT_NAME" != "workflow_call" && "$FORCE_BUILD" != "true" ]]; then
+            assets="$(gh release view "$LATEST_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+            if grep -Fxq "Bitwarden-${LATEST_TAG}-standard.apk" <<< "$assets" &&
+               grep -Fxq "Bitwarden-${LATEST_TAG}-hyperos.apk" <<< "$assets"; then
+              should_build=false
+            fi
+          fi
+          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
+          echo "Upstream Android tag: $LATEST_TAG; build required: $should_build"
+
   build-source:
     name: Build Android (${{ matrix.variant }})
     runs-on: ubuntu-24.04
     needs:
       - setup
+    if: needs.setup.outputs.should_build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -298,6 +327,7 @@ jobs:
     name: Publish both Android variants
     runs-on: ubuntu-24.04
     needs: [setup, build-source]
+    if: needs.setup.outputs.should_build == 'true'
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       LATEST_ANDROID_TAG: ${{ needs.setup.outputs.latest_android_tag }}
