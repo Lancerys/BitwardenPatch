@@ -251,6 +251,12 @@ jobs:
         run: |
           set -euo pipefail
           npm run "${{ matrix.npm_command }}"
+          expected="dist/${{ matrix.archive_name }}"
+          generated="dist/oss-${{ matrix.archive_name }}"
+          if [[ -s "$generated" && ! -e "$expected" ]]; then
+            mv "$generated" "$expected"
+          fi
+          test -s "$expected"
 
       - name: Upload extension artifact
         uses: actions/upload-artifact@v4
